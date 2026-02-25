@@ -1,68 +1,71 @@
-import { DurableObject } from "cloudflare:workers";
-
-/**
- * Welcome to Cloudflare Workers! This is your first Durable Objects application.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your Durable Object in action
- * - Run `npm run deploy` to publish your application
- *
- * Learn more at https://developers.cloudflare.com/durable-objects
- */
-
-/**
- * Env provides a mechanism to reference bindings declared in wrangler.jsonc within JavaScript
- *
- * @typedef {Object} Env
- * @property {DurableObjectNamespace} MY_DURABLE_OBJECT - The Durable Object namespace binding
- */
-
-/** A Durable Object's behavior is defined in an exported Javascript class */
-export class MyDurableObject extends DurableObject {
-	/**
-	 * The constructor is invoked once upon creation of the Durable Object, i.e. the first call to
-	 * 	`DurableObjectStub::get` for a given identifier (no-op constructors can be omitted)
-	 *
-	 * @param {DurableObjectState} ctx - The interface for interacting with Durable Object state
-	 * @param {Env} env - The interface to reference bindings declared in wrangler.jsonc
-	 */
-	constructor(ctx, env) {
-		super(ctx, env);
-	}
-
-	/**
-	 * The Durable Object exposes an RPC method sayHello which will be invoked when a Durable
-	 *  Object instance receives a request from a Worker via the same method invocation on the stub
-	 *
-	 * @param {string} name - The name provided to a Durable Object instance from a Worker
-	 * @returns {Promise<string>} The greeting to be sent back to the Worker
-	 */
-	async sayHello(name) {
-		return `Hello, ${name}!`;
-	}
-}
+import { MyDurableObject, ChatMemoryDO  } from "./agent-do.js";
 
 export default {
-	/**
-	 * This is the standard fetch handler for a Cloudflare Worker
-	 *
-	 * @param {Request} request - The request submitted to the Worker from the client
-	 * @param {Env} env - The interface to reference bindings declared in wrangler.jsonc
-	 * @param {ExecutionContext} ctx - The execution context of the Worker
-	 * @returns {Promise<Response>} The response to be sent back to the client
-	 */
-	async fetch(request, env, ctx) {
-		// Create a stub to open a communication channel with the Durable Object
-		// instance named "foo".
-		//
-		// Requests from all Workers to the Durable Object instance named "foo"
-		// will go to a single remote Durable Object instance.
-		const stub = env.MY_DURABLE_OBJECT.getByName("foo");
+  async fetch(req, env) {
+    const url = new URL(req.url);
 
-		// Call the `sayHello()` RPC method on the stub to invoke the method on
-		// the remote Durable Object instance.
-		const greeting = await stub.sayHello("world");
+	if (req.method === "GET" && url.pathname === "/health") {
+      return Response.json({ ok: true, path: url.pathname });
+    }
 
-		return new Response(greeting);
-	},
+	if (url.pathname.startsWith("/debug")) {
+  return Response.json({
+    method: req.method,
+    pathname: url.pathname,
+    url: req.url,
+    contentType: req.headers.get("content-type"),
+  });
+}
+
+
+    // POST /ask { "sessionId": "abc", "question": "..." }
+    if (req.method === "POST" && url.pathname === "/ask") {
+      const body = await req.json().catch(() => null);
+      if (!body?.sessionId || !body?.question) {
+        return Response.json({ error: "sessionId and question required" }, { status: 400 });
+      }
+
+      // 1) Get DO for this session
+      const id = env.CHAT_DO.idFromName(body.sessionId);
+	  const stub = env.CHAT_DO.get(id);
+
+      // 2) Read history from DO
+      const historyResp = await stub.fetch("https://do.local/history");
+      const history = await historyResp.json(); // [{role, content}, ...]
+
+      // 3) Call Workers AI (Llama)
+      const messages = [
+        { role: "system", content: "You are a helpful Q&A assistant. Keep answers concise and correct." },
+        ...history,
+        { role: "user", content: body.question },
+      ];
+
+      const aiResp = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+        messages,
+        max_tokens: 500,
+      });
+
+      const answer =
+        aiResp?.response ??
+        aiResp?.output_text ??
+        aiResp?.result ??
+        JSON.stringify(aiResp);
+
+      // 4) Save new turn to DO
+      await stub.fetch("https://do.local/append", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify([
+          { role: "user", content: body.question },
+          { role: "assistant", content: answer },
+        ]),
+      });
+
+      return Response.json({ answer });
+    }
+
+    return new Response("Not found", { status: 404 });
+  },
 };
+
+export { MyDurableObject, ChatMemoryDO  };

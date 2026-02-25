@@ -1,0 +1,20 @@
+name = "cloudflare"
+main = "src/index.js"
+compatibility_date = "2026-02-14"
+
+[ai]
+binding = "AI"
+
+# Keep the old binding/class to satisfy existing DO dependencies
+[[durable_objects.bindings]]
+name = "MY_DURABLE_OBJECT"
+class_name = "MyDurableObject"
+
+# Add a NEW SQLite-backed DO for chat memory
+[[durable_objects.bindings]]
+name = "CHAT_DO"
+class_name = "ChatMemoryDO"
+
+[[migrations]]
+tag = "v4"
+new_sqlite_classes = ["ChatMemoryDO"]
